@@ -1008,6 +1008,10 @@ if __FILE__ == $0
       Environment:
         TRY_PATH          Tries directory (default: ~/src/tries)
         TRY_PROJECTS      Graduate destination (default: parent of TRY_PATH)
+        TRY_RUNNER        split-serial runner copied into each new try
+                          (default: ~/.config/opencode/scripts/split-serial.sh)
+
+      New tries arrive with prompt/ (empty pack) and scripts/split-serial.sh.
 
       Keyboard:
         ↑/↓, Ctrl-P/N     Navigate
@@ -1438,6 +1442,25 @@ if __FILE__ == $0
   # --- Shell script helpers ---
   SCRIPT_WARNING = "# if you can read this, you didn't launch try from an alias. run try --help."
 
+  # Quality contract written into every new try's AGENTS.md.
+  QUALITY_CONTRACT = <<~TEXT
+    # Agent instructions
+
+    This repository follows the razodin137 house style, and the gate is executable:
+
+        house fix      # apply every lane's fixer
+        house check    # read-only gate; exit 0 means clean
+
+    Rules:
+
+    1. Run `house fix`, then `house check`, until `house check` exits 0. Run `house check` before you call the work done.
+    2. Exit 1 means violations remain; keep fixing. Exit 2 means a lane has files but no tool or config: report which one and do not route around it.
+    3. Fix the source. Never disable a rule, edit the shared `@razodin137/*` configs, or edit `node_modules`.
+    4. Do not commit unless asked.
+
+    If `house` is unavailable on this machine, install the packages by path from the fork; the checkout's AGENTS.md has the commands.
+  TEXT
+
   def q(str)
     "'" + str.gsub("'", %q('"'"')) + "'"
   end
@@ -1486,7 +1509,53 @@ if __FILE__ == $0
   end
 
   def script_mkdir_cd(path)
-    ["mkdir -p #{q(path)}"] + script_cd(path)
+    # Every freshly created trial is a git repo from the start, carrying the
+    # prompting framework: prompt/ for the pack, scripts/split-serial.sh to
+    # replay it. The runner's clean-tree gate needs the runner committed, so
+    # the scaffold lands as the repo's first commit.
+    ["mkdir -p #{q(path)}", "git -C #{q(path)} init -q"] + quality_contract_commands(path) + prompt_framework_commands(path) + script_cd(path)
+  end
+
+  # Every new try carries the quality contract, paired with the .claude/CLAUDE.md
+  # import so Claude Code (which does not read AGENTS.md) sees it too. Never
+  # overwrite files that already exist (try . may reuse a populated directory).
+  def quality_contract_commands(path)
+    agents = File.join(path, 'AGENTS.md')
+    return [] if File.exist?(agents)
+
+    claude = File.join(path, '.claude', 'CLAUDE.md')
+    lines = QUALITY_CONTRACT.lines.map { |line| q(line.chomp) }.join(' ')
+    cmds = ["printf '%s\\n' #{lines} > #{q(agents)}"]
+    unless File.exist?(claude)
+      cmds << "mkdir -p #{q(File.dirname(claude))}"
+      cmds << "printf '%s\\n' '@../AGENTS.md' > #{q(claude)}"
+    end
+    cmds
+  end
+
+  # Canonical prompting-framework runner. New tries get prompt/ and
+  # scripts/split-serial.sh so a pack can be written and replayed immediately.
+  def prompt_runner_path
+    File.expand_path(ENV['TRY_RUNNER'] || "~/.config/opencode/scripts/split-serial.sh")
+  end
+
+  def prompt_framework_commands(path)
+    runner_source = prompt_runner_path
+    return [] unless File.file?(runner_source)
+
+    runner = File.join(path, 'scripts', 'split-serial.sh')
+    return [] if File.exist?(runner)
+
+    cmds = [
+      "mkdir -p #{q(File.join(path, 'prompt'))} #{q(File.dirname(runner))}",
+      "install -m 755 #{q(runner_source)} #{q(runner)}"
+    ]
+    # The runner logs to .scratch/split; keep those logs out of its clean-tree gate.
+    unless File.exist?(File.join(path, '.gitignore'))
+      cmds << "printf '.scratch/\\n' > #{q(File.join(path, '.gitignore'))}"
+    end
+    cmds << "git -C #{q(path)} add -A && git -C #{q(path)} commit -q -m #{q('scaffold: split-serial runner')}"
+    cmds
   end
 
   def script_clone(path, uri)
